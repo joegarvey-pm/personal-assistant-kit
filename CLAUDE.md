@@ -271,13 +271,15 @@ When in doubt, exclude. Do not paraphrase redacted content — omit entirely. If
 
 The Bee processing half runs on **Claude Code** now, not Kiro. The PowerShell sync (Layer 1
 scheduled task + Layer 2 watcher) writes sentinels into `.kiro/bee-inbox/`; a Claude Code
-consumer drains them.
+consumer drains them. On macOS, `scripts/mac/` replaces the PowerShell scripts with two launchd
+jobs (see `scripts/mac/README.md`); the sentinel contract and the consumer are the same.
 
 | Component | Trigger | What it does |
 |-----------|---------|-------------|
-| `.claude/agents/bee-processor.md` | invoked by the command/runner | The subagent that does the work: for each pending sentinel — idempotency guard → completeness gate (skip partial/sparse) → redact → write the three outputs to the vault → delete the sentinel. Tools scoped to Read/Write/Glob/Grep/Bash; no send/ticket/email. |
+| `.claude/agents/bee-processor.md` | invoked by the command/runner | The subagent that does the work: for each pending sentinel — idempotency guard → completeness gate (skip partial/sparse) → redact → write the outputs to the vault (meeting note last) → write a done marker in `.kiro/bee-inbox/_done/` → delete the sentinel (on macOS the runner deletes it). Tools scoped to Read/Write/Edit/Glob/Grep/Bash; no send/ticket/email. |
 | `.claude/commands/process-bee-inbox.md` | `/process-bee-inbox` (manual) | The reliable manual path. Drains ALL pending sentinels in one pass. |
 | `scripts/run-bee-process.ps1` | scheduled task `BeeProcess30Min` | Headless runner: `claude -p '/process-bee-inbox'` on a cadence (every 30 min by default), cheap early-out when no sentinels pend. Replaces the retired Kiro auto-hook. |
+| `scripts/mac/run-bee-process.sh` | launchd job `com.personal-assistant-kit.bee-process` (started by the sync when it writes sentinels; every 30 min as a fallback) | macOS headless runner with the same contract, plus an optional preflight command and a watchdog. Claude runs in `dontAsk` mode: it may read inside the repo and the vault, run `ls`, `wc` and `date` there, and write only Markdown directly inside the output folders and `.kiro/bee-inbox/_done/`. The agent deletes nothing there: the runner removes each sentinel whose done marker is newer than it. `scripts/mac/bee_sync.py` is the matching sync job. |
 
 Output folders are read from `.claude/bee-paths.local.json` (gitignored, personalized;
 `.claude/bee-paths.example.json` is the tracked template). The vault root is derived from
@@ -293,14 +295,15 @@ bee sync (scheduled/watcher) → raw capture to vault → sentinel to .kiro/bee-
         idempotency guard (skip if bee_conversation_id already in vault)
         completeness gate (skip if state still CAPTURING / sparse; leave its sentinel)
         redact, generate slug, draft outputs
-        write the three outputs directly to the vault (Write tool reaches outside the repo)
-        delete the sentinel (only after outputs land)
+        write the outputs directly to the vault, meeting note last (Write/Edit reach outside the repo)
+        write the done marker .kiro/bee-inbox/_done/<id>.md
+        delete the sentinel (on macOS the runner does it, for each sentinel older than its marker)
     → summarize
 ```
 
 Unlike the old Kiro/MCP path, Claude Code writes directly to the vault, so there is no
 `_output/` staging or `apply-bee-outputs` last-mile step. The close-the-loop guarantee is
-the same: a sentinel is deleted only after its outputs land.
+the same: a sentinel is deleted only after its outputs land and its done marker is written.
 
 ### The event seam is single-consumer today (conditional generalization)
 
@@ -309,8 +312,13 @@ consumer right now. **When a second event-driven consumer is added**, generalize
 `.agent-inbox/<consumer>/*.sentinel.md` (one subfolder per consumer) and update the four
 sentinel-dir defaults at that time: `scripts/bee-sync-scheduled.ps1` (`$SentinelDir`),
 `scripts/bee-stream-watcher.ps1` (`$SentinelDir`), `scripts/run-bee-process.ps1`
-(`$sentinelDir`), and `scripts/install-bee-sync-task.ps1`. Until then, do NOT move it;
-moving it now would break the running `BeeProcess30Min` task for zero benefit.
+(`$sentinelDir`), and `scripts/install-bee-sync-task.ps1`. The two prompt files,
+`.claude/agents/bee-processor.md` and `.claude/commands/process-bee-inbox.md`, name the inbox and
+its `_done/` marker folder too; update them in the same change. Until then, do NOT move it;
+moving it now would break the running `BeeProcess30Min` task for zero benefit. On macOS the
+seam is `sentinel_dir` in `~/.config/bee-sync/config.json` (written by
+`scripts/mac/bee-launchd.sh install`) plus the same default in `scripts/mac/run-bee-process.sh`;
+update both when the seam moves.
 
 At the same time the seam is generalized, extract the copy-pasted sentinel-writing heredoc
 (duplicated in `bee-sync-scheduled.ps1` and `bee-stream-watcher.ps1`, both still carrying the
@@ -368,7 +376,8 @@ personal-assistant-kit/
 │   ├── run-bee-process.ps1            ← Headless Claude Code consumer runner
 │   ├── bee-process-silent.vbs        ← Silent launcher for the process task
 │   ├── install-bee-process-task.ps1  ← Installs the BeeProcess30Min task
-│   └── apply-bee-outputs.template.ps1 ← Legacy Kiro/MCP vault write-back (unused by Claude Code)
+│   ├── apply-bee-outputs.template.ps1 ← Legacy Kiro/MCP vault write-back (unused by Claude Code)
+│   └── mac/                           ← macOS port on launchd: bee_sync.py, run-bee-process.sh, bee-launchd.sh, README.md
 ├── docs/
 │   ├── bee-setup.md
 │   ├── enterprise-mcp-patterns.md
@@ -427,7 +436,7 @@ Be precise about what actually runs *inside the agent* versus what is *offline d
 | `system-prompt.md`, `.kiro/steering/*.md` | The behavioral contract the model reads | **Yes** — this is the live runtime |
 | `.claude/agents/bee-processor.md`, `.claude/commands/process-bee-inbox.md` | Claude Code subagent + command — the live Bee consumer | **Yes** — when Claude Code is the client |
 | `.kiro/hooks/*.kiro.hook` | Kiro-triggered agent prompts (the Bee ones are deprecated/disabled) | Only if Kiro is the client; the Bee hooks no longer fire |
-| Bee sync + process `scripts/*.ps1` | Windows Task Scheduler / login automation | **Yes** — but as OS processes, not inside the agent |
+| Bee sync + process `scripts/*.ps1`, `scripts/mac/*` | Windows Task Scheduler / login automation; launchd on macOS | **Yes** — but as OS processes, not inside the agent |
 | `validators/` | TS CLI: schema / redaction / routing / idempotency checks | **No** — offline CLI you run against the vault; nothing calls it at agent runtime |
 | `observability/` | TS logging / tracing / metering / drift | **No** — only the offline eval runner imports it; it does not observe live agent turns |
 | `evals/` | TS harness calling the Claude API with fixtures | **No** — offline test suite; runs in CI against the shipped prompts, not during an agent turn |
@@ -442,7 +451,7 @@ The TS subsystems are useful **offline** (run them in CI or by hand to check the
 |------|--------|-----------|---------------|
 | CLAUDE.md + agent architecture | Built | This file — the system contract | Runtime (read by the agent) |
 | Daily Triage + GTD workflows | Built | `system-prompt.md` + `.kiro/steering/gtd-assistant.md` | Runtime |
-| Bee pipeline | Built | sync scripts (Layer 1 + 2) + processing rules + Claude Code consumer (`bee-processor` subagent, `/process-bee-inbox`, `run-bee-process.ps1`); Kiro hooks deprecated | OS automation + Claude Code runtime |
+| Bee pipeline | Built | sync scripts (Layer 1 + 2) + processing rules + Claude Code consumer (`bee-processor` subagent, `/process-bee-inbox`, `run-bee-process.ps1`); macOS port in `scripts/mac/`; Kiro hooks deprecated | OS automation + Claude Code runtime |
 | Evals | Built (offline, CI-gated) | `evals/` — 5 suites (inbox, Bee, review, status, confirm-before-write) against the shipped prompts/hooks | Offline CLI + GitHub Actions (`.github/workflows/evals.yml`) |
 | Observability | Built (offline) | `observability/` — logs, traces, metering, drift | Offline; imported only by the eval runner |
 | Validators | Built (offline) | `validators/` — schema, redaction, routing, idempotency, continuation | Offline CLI; **not** invoked at agent runtime |
