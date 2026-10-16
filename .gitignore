@@ -54,6 +54,7 @@ Technical_Program_Manager_Role_Guideline*.docx
 .kiro/bee-inbox/_staging/
 .kiro/bee-inbox/_output/
 .kiro/bee-inbox/*.sentinel.md
+.kiro/bee-inbox/_done/
 
 # Claude Code Bee consumer: local (personalized) vault path map. The .example.json
 # is tracked; the .local.json holds this user's real vault-relative folders.
